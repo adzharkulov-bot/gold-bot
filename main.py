@@ -2,7 +2,7 @@ import requests, time, threading
 from flask import Flask
 from datetime import datetime, timezone, timedelta
 
-BOT_TOKEN = "8977593511:AAHFs2scjhfzT1iRz77JIBliA48FzT-y8V4"
+BOT_TOKEN = "8639126332:AAGwJMa7InLOuMosdcS7nAZJ_boriBZK2HA"
 CHAT_ID = "8639126332"
 
 app = Flask(__name__)
