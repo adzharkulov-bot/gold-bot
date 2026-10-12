@@ -1,7 +1,7 @@
 import os, time, threading, requests
 from flask import Flask
 app = Flask(__name__)
-BOT_TOKEN = os.getenv "8639126332:AAGwJMa7InLOuMosdcS7nAZJ_boriBZK2HA"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL = "@xauusdakyl"
 
 def send(text):
