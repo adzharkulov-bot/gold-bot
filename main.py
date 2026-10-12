@@ -1,7 +1,6 @@
 import os, time, threading, requests
-import yfinance as yf
-import pandas as pd
 from flask import Flask
+import json
 
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL = "@xauusdakyl"
@@ -11,100 +10,105 @@ def send(msg):
     if not TOKEN: return
     try:
         r = requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": CHANNEL, "text": msg, "parse_mode":"HTML"}, timeout=10)
-        print(f"TG->{r.status_code} {r.text[:100]}", flush=True)
+            json={"chat_id": CHANNEL, "text": msg, "parse_mode":"HTML"}, timeout=15)
+        print(f"TG->{r.status_code}", flush=True)
     except Exception as e:
         print(f"TG ERR {e}", flush=True)
 
-def get_data():
-    # XAUUSD = GC=F (Gold Futures) - эң туруктуу
-    df = yf.download("GC=F", period="5d", interval="15m", progress=False)
-    if df.empty: return None
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    df['EMA50'] = df['Close'].ewm(span=50).mean()
-    df['EMA200'] = df['Close'].ewm(span=200).mean()
-    delta = df['Close'].diff()
-    gain = delta.where(delta>0, 0).ewm(alpha=1/14).mean()
-    loss = -delta.where(delta<0, 0).ewm(alpha=1/14).mean()
-    df['RSI'] = 100 - (100/(1+gain/loss))
-    df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-    df['MACD_sig'] = df['MACD'].ewm(span=9).mean()
-    return df
+def get_gold():
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=15m&range=5d"
+        j = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=15).json()
+        closes = j['chart']['result'][0]['indicators']['quote'][0]['close']
+        closes = [c for c in closes if c is not None][-200:]
+        return closes
+    except Exception as e:
+        print(f"DATA ERR {e}", flush=True)
+        return None
 
-def check_100_setup(df):
-    c = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = float(c['Close'])
-    score_buy = 0
-    score_sell = 0
-    reasons = []
+def ema(data, span):
+    k = 2/(span+1)
+    e = data[0]
+    for p in data[1:]: e = p*k + e*(1-k)
+    return e
 
-    # 1. Trend
-    if price > c['EMA50'] > c['EMA200']:
-        score_buy+=1; reasons.append("EMA50>EMA200 өйдө тренд")
-    if price < c['EMA50'] < c['EMA200']:
-        score_sell+=1; reasons.append("EMA50<EMA200 ылдый тренд")
+def rsi(data, period=14):
+    gains=losses=0
+    for i in range(1, period+1):
+        d = data[-i] - data[-i-1]
+        if d>0: gains+=d
+        else: losses+=-d
+    if losses==0: return 70
+    rs = (gains/period)/(losses/period)
+    return 100 - (100/(1+rs))
 
-    # 2. RSI
-    if 48 < c['RSI'] < 68: 
-        score_buy+=1; reasons.append(f"RSI {c['RSI']:.1f} күч")
-    if 32 < c['RSI'] < 52:
-        score_sell+=1; reasons.append(f"RSI {c['RSI']:.1f} алсыздык")
+def check_100(closes):
+    if len(closes)<200: return None, closes[-1], [], 0
+    price = closes[-1]
+    ema50 = ema(closes[-50:], 50)
+    ema200 = ema(closes[-200:], 200)
+    r = rsi(closes)
+    # MACD simple
+    ema12 = ema(closes[-12:], 12)
+    ema26 = ema(closes[-26:], 26)
+    macd = ema12-ema26
 
-    # 3. MACD
-    if c['MACD'] > c['MACD_sig'] and prev['MACD'] <= prev['MACD_sig']:
-        score_buy+=1; reasons.append("MACD bullish crossover")
-    if c['MACD'] < c['MACD_sig'] and prev['MACD'] >= prev['MACD_sig']:
-        score_sell+=1; reasons.append("MACD bearish crossover")
+    score_buy=0; score_sell=0; reasons=[]
 
-    # 4. Price vs EMA50 distance (поддержка)
-    if 0 < (price - c['EMA50'])/price < 0.003: # 0.3% жакын
-        score_buy+=1; reasons.append("EMA50 поддержкадан секирүү")
-    if 0 < (c['EMA50'] - price)/price < 0.003:
+    if price > ema50 > ema200:
+        score_buy+=1; reasons.append(f"Тренд өйдө: {price:.1f} > EMA50 {ema50:.1f}")
+    if price < ema50 < ema200:
+        score_sell+=1; reasons.append(f"Тренд ылдый: {price:.1f} < EMA50")
+
+    if 48 < r < 68:
+        score_buy+=1; reasons.append(f"RSI {r:.1f} күч бар")
+    if 32 < r < 52:
+        score_sell+=1; reasons.append(f"RSI {r:.1f} алсыздык")
+
+    if macd > 0 and closes[-1] > closes[-2]:
+        score_buy+=1; reasons.append("MACD оң + өсүш")
+    if macd < 0 and closes[-1] < closes[-2]:
+        score_sell+=1; reasons.append("MACD терс + түшүш")
+
+    if 0 < (price-ema50)/price < 0.004:
+        score_buy+=1; reasons.append("EMA50 колдоодон секирүү")
+    if 0 < (ema50-price)/price < 0.004:
         score_sell+=1; reasons.append("EMA50 каршылыктан кайтуу")
 
-    # 5. ATR / Volatility - соңку 3 бар өсүп жатабы
-    if df['Close'].iloc[-3:].is_monotonic_increasing and c['RSI']<70:
+    # 3 бар өсүш/түшүш
+    if closes[-3] < closes[-2] < closes[-1] and r<70:
         score_buy+=1
-    if df['Close'].iloc[-3:].is_monotonic_decreasing and c['RSI']>30:
+    if closes[-3] > closes[-2] > closes[-1] and r>30:
         score_sell+=1
 
-    # 6. 100% чечим - 5+ шарт
-    if score_buy >= 5:
-        return "BUY", price, reasons, score_buy
-    if score_sell >= 5:
-        return "SELL", price, reasons, score_sell
+    if score_buy>=5: return "BUY", price, reasons, score_buy
+    if score_sell>=5: return "SELL", price, reasons, score_sell
     return None, price, [], 0
 
 def loop():
-    print("Loop started - 100% setup гана күтүү режими", flush=True)
-    send("✅ gold-bot 100% сетап режимине өттү. Эми ар 30мүн эмес, болгону идеал сетапта гана сигнал @xauusdakyl")
-    last_signal = 0
+    print("Loop 100% ONLY mode", flush=True)
+    send("✅ gold-bot эми 100% сетап гана күтөт. Ар 30мүн эмес — болгону идеал сигналда @xauusdakyl")
+    last=0
     while True:
         try:
-            df = get_data()
-            if df is not None:
-                side, price, reasons, score = check_100_setup(df)
-                if side and time.time() - last_signal > 3600*2: # 2 саатта 1 жолу гана
+            closes = get_gold()
+            if closes:
+                side, price, reasons, score = check_100(closes)
+                print(f"Check price {price:.2f} side={side} score={score}", flush=True)
+                if side and time.time()-last > 7200: # 2 саатта 1 жолу
                     sl = price*0.996 if side=="BUY" else price*1.004
                     tp = price*1.008 if side=="BUY" else price*0.992
-                    txt = f"<b>XAUUSD {price:.2f} - 100% {side} 🟢</b>\n\n"
-                    txt += f"Score: {score}/6 ✅\n"
-                    txt += "\n".join([f"• {r}" for r in reasons[:5]])
-                    txt += f"\n\nSL: {sl:.2f} | TP: {tp:.2f}\n\n#XAUUSD #100setup"
+                    txt = f"<b>XAUUSD {price:.2f} — 100% {side} 🔥</b>\n\nScore {score}/5 ✅\n"
+                    txt += "\n".join([f"• {r}" for r in reasons])
+                    txt += f"\n\nSL {sl:.2f} | TP {tp:.2f}\n\n#XAUUSD"
                     send(txt)
-                    last_signal = time.time()
-                else:
-                    print(f"No 100% setup. Price {df.iloc[-1]['Close']:.2f} score check", flush=True)
+                    last=time.time()
         except Exception as e:
-            print(f"ERR {e}", flush=True)
-        time.sleep(900) # 15 мүн сайын текшер
+            print(f"LOOP ERR {e}", flush=True)
+        time.sleep(900)
 
 threading.Thread(target=loop, daemon=True).start()
-
 @app.route("/")
-def home(): return "gold-bot 100% setup mode live"
-
-if __name__ == "__main__":
+def home(): return "gold-bot 100% live"
+if __name__=="__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT",10000)))
