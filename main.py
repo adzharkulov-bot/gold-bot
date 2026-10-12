@@ -3,7 +3,7 @@ from flask import Flask
 from datetime import datetime
 
 app = Flask(__name__)
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("8639126332:AAGwJMa7InLOuMosdcS7nAZJ_boriBZK2HA")
 CHAT = "@xauusdakyl"
 
 @app.route('/')
