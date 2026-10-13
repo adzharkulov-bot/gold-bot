@@ -1,102 +1,64 @@
 import yfinance as yf
 import pandas as pd
-import time
-import requests
-import os
+import time, requests, os, threading
+from flask import Flask
 
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-SYMBOL = "GC=F"
+SYMBOL = "GC=F" # GOLD
 
-COOLDOWN = 2 * 3600
-last_signal_time = 0
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "AMD BOT LIVE"
+
+COOLDOWN = 2*3600
+last_time = 0
 last_type = None
 
 def send(msg):
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
         requests.post(url, data={"chat_id": CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
-    except Exception as e:
-        print(f"Send error {e}")
+    except:
+        pass
 
-def get_data():
-    df = yf.download(SYMBOL, period="2d", interval="5m", auto_adjust=True)
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-    return df
+def bot_loop():
+    global last_time, last_type
+    print("BOT LOOP STARTED")
+    while True:
+        try:
+            df = yf.download(SYMBOL, period="2d", interval="5m", auto_adjust=True, progress=False)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            if len(df) < 100:
+                time.sleep(60)
+                continue
 
-print("BOT STARTED AMD DISTRIBUTION")
+            df['EMA20'] = df['Close'].ewm(span=20).mean()
+            df['EMA50'] = df['Close'].ewm(span=50).mean()
 
-while True:
-    try:
-        df = get_data()
-        if len(df) < 100:
-            time.sleep(60)
-            continue
+            price = float(df['Close'].iloc[-1])
+            ema20 = float(df['EMA20'].iloc[-1])
+            ema50 = float(df['EMA50'].iloc[-1])
 
-        df['EMA20'] = df['Close'].ewm(span=20).mean()
-        df['EMA50'] = df['Close'].ewm(span=50).mean()
-        
-        curr = df.iloc[-1]
-        price = float(curr['Close'])
-        ema20 = float(curr['EMA20'])
-        ema50 = float(curr['EMA50'])
+            asia = df.iloc[-80:-20]
+            ah = float(asia['High'].max())
+            al = float(asia['Low'].min())
+            rng = ah - al
+            fib_short = ah - rng*0.38
+            fib_long = al + rng*0.38
 
-        asia = df.iloc[-80:-20]
-        asia_high = float(asia['High'].max())
-        asia_low = float(asia['Low'].min())
-        
-        range_hl = asia_high - asia_low
-        fib_short = asia_high - range_hl * 0.38
-        fib_long = asia_low + range_hl * 0.38
+            prev = float(df['Close'].iloc[-2])
+            manip_high = prev < ah and price > ah
+            manip_low = prev > al and price < al
 
-        prev_close = float(df.iloc[-2]['Close'])
-        manipulated_high = prev_close < asia_high and price > asia_high
-        manipulated_low = prev_close > asia_low and price < asia_low
+            sig = None
+            if manip_high and price < fib_short and ema20 < ema50:
+                sig = "SELL"
+            if manip_low and price > fib_long and ema20 > ema50:
+                sig = "BUY"
 
-        signal = None
-        sl = 0
-        tp = 0
-
-        if manipulated_high and price < fib_short and ema20 < ema50:
-            signal = "SELL"
-            sl = asia_high + 5
-            tp = asia_low
-
-        if manipulated_low and price > fib_long and ema20 > ema50:
-            signal = "BUY"
-            sl = asia_low - 5
-            tp = asia_high
-
-        can_send = (time.time() - last_signal_time) > COOLDOWN
-        no_flip = True
-        if last_type and last_type != signal:
-            if (time.time() - last_signal_time) < 4*3600:
-                no_flip = False
-
-        if signal and can_send and no_flip:
-            if signal == "BUY":
-                icon = "BUY"
-            else:
-                icon = "SELL"
-            
-            msg = "<b>XAUUSD " + icon + " " + f"{price:.2f}" + "</b>\n\n"
-            msg += "AMD Distribution confirmed\n"
-            msg += f"Asia: {asia_low:.1f} - {asia_high:.1f}\n"
-            msg += f"38% Fib: {fib_short:.1f}\n"
-            msg += f"EMA20: {ema20:.1f} | EMA50: {ema50:.1f}\n\n"
-            msg += f"SL: {sl:.2f}\n"
-            msg += f"TP: {tp:.2f}\n\n"
-            msg += "#GOLD #XAUUSD"
-            
-            send(msg)
-            last_signal_time = time.time()
-            last_type = signal
-            print(f"SENT {signal}")
-
-        print(f"PRICE {price:.2f} ASIA {asia_low:.1f}-{asia_high:.1f}")
-        time.sleep(60)
-
-    except Exception as e:
-        print(f"Error: {e}")
-        time.sleep(60)
+            can_send = (time.time() - last_time) > COOLDOWN
+            if sig and can_send:
+                if last_type != sig or (time.time()-last_time)>144
