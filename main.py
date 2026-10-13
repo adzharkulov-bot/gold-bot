@@ -3,76 +3,106 @@ from flask import Flask
 
 TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-
 app = Flask(__name__)
 @app.route('/')
-def home():
-    return "GOLD BOT LIVE - AMD"
+def home(): return "XAUUSD AMD PRO LIVE"
 
 def send(text):
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+        data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
     except: pass
 
-def get_price_data():
-    # Yahoo API түз, pandas'sыз
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=5m&range=2d"
-    r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=15).json()
-    result = r['chart']['result'][0]
-    closes = result['indicators']['quote'][0]['close']
-    highs = result['indicators']['quote'][0]['high']
-    lows = result['indicators']['quote'][0]['low']
-    # None'лерди тазалоо
-    closes = [c for c in closes if c is not None]
-    highs = [h for h in highs if h is not None]
-    lows = [l for l in lows if l is not None]
+def get_data(symbol="GC=F", range_="2d", interval="5m"):
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={range_}"
+    j = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=15).json()['chart']['result'][0]
+    q = j['indicators']['quote'][0]
+    closes = [x for x in q['close'] if x]
+    highs = [x for x in q['high'] if x]
+    lows = [x for x in q['low'] if x]
     return closes, highs, lows
 
-last_time = 0
-def bot_loop():
-    global last_time
-    print("BOT LOOP STARTED NO PANDAS")
+def rsi_calc(closes, period=14):
+    gains = losses = 0
+    for i in range(1, period+1):
+        diff = closes[-i] - closes[-i-1]
+        if diff > 0: gains += diff
+        else: losses += abs(diff)
+    if losses == 0: return 70
+    rs = (gains/period) / (losses/period)
+    return 100 - (100 / (1+rs))
+
+last_sig = 0
+def loop():
+    global last_sig
+    print("AMD PRO STARTED")
     while True:
         try:
-            closes, highs, lows = get_price_data()
-            if len(closes) < 80:
-                time.sleep(60)
-                continue
+            c5, h5, l5 = get_data("GC=F", "2d", "5m")
+            c1h, _, _ = get_data("GC=F", "5d", "1h") # H1 тренд
 
-            price = closes[-1]
-            # EMA20 vs EMA50 ордуна жөнөкөй орточо
-            ema20 = sum(closes[-20:]) / 20
-            ema50 = sum(closes[-50:]) / 50
+            if len(c5) < 100: time.sleep(60); continue
 
-            # Азия коробкасы (кечээки 60 шам)
-            asia_high = max(highs[-80:-20])
-            asia_low = min(lows[-80:-20])
-            rng = asia_high - asia_low
-            fib_short = asia_high - rng * 0.38
-            fib_long = asia_low + rng * 0.38
+            price = c5[-1]
+            ema20 = sum(c5[-20:])/20
+            ema50 = sum(c5[-50:])/50
+            ema1h = sum(c1h[-50:])/50
+            rsi = rsi_calc(c5)
 
-            prev = closes[-2]
+            # 1. Азия коробкасы
+            asia_h = max(h5[-80:-20])
+            asia_l = min(l5[-80:-20])
+
+            # 2. Манипуляция текшерүү (Sweep)
+            prev = c5[-2]
+            sweep_high = prev < asia_h and price > asia_h
+            sweep_low = prev > asia_l and price < asia_l
+
+            # 3. Структура (BOS) - коробкадан кайтуу
+            bos_sell = price < (asia_h - (asia_h-asia_l)*0.3)
+            bos_buy = price > (asia_l + (asia_h-asia_l)*0.3)
+
+            # 4. Скор системасы
+            score_sell = 0
+            if sweep_high: score_sell+=1
+            if ema20 < ema50: score_sell+=1
+            if price < ema1h: score_sell+=1 # H1 да SELL болсо
+            if bos_sell and rsi < 60: score_sell+=1
+
+            score_buy = 0
+            if sweep_low: score_buy+=1
+            if ema20 > ema50: score_buy+=1
+            if price > ema1h: score_buy+=1
+            if bos_buy and rsi > 40: score_buy+=1
+
             sig = None
-            # ДИСТРИБУЦИЯ
-            if prev < asia_high and price > asia_high and price < fib_short and ema20 < ema50:
-                sig = "SELL"
-            if prev > asia_low and price < asia_low and price > fib_long and ema20 > ema50:
-                sig = "BUY"
+            if score_sell >= 3: sig = "SELL"
+            if score_buy >= 3: sig = "BUY"
 
-            if sig and (time.time() - last_time) > 7200: # 2 саатта 1
-                msg = f"<b>XAUUSD {sig} {price:.2f}</b>\n\nAMD Distribution\nAsia {asia_low:.1f}-{asia_high:.1f}\nFib 38% {fib_short:.1f}\nEMA {ema20:.1f}/{ema50:.1f}\n\n#GOLD"
+            # Эски катаны оңдоо: H1 BUY болуп турганда SELL бербейбиз
+            if sig=="SELL" and price > ema1h and rsi > 52:
+                print(f"BLOCKED FAKE SELL - H1 is BUY, RSI {rsi:.1f}")
+                sig = None
+            if sig=="BUY" and price < ema1h and rsi < 48:
+                sig = None
+
+            if sig and (time.time()-last_sig) > 10800: # 3 саатта 1
+                sl = asia_h + 6 if sig=="SELL" else asia_l - 6
+                tp = asia_l if sig=="SELL" else asia_h
+                rr = f"{abs(price-sl):.2f} / {abs(tp-price):.2f}"
+                icon = "🔴" if sig=="SELL" else "🟢"
+                msg = (f"{icon} <b>XAUUSD {sig} {price:.2f}</b>\n\n"
+                       f"Score: {max(score_sell,score_buy)}/4 | RSI: {rsi:.1f}\n"
+                       f"EMA20: {ema20:.1f} | EMA50: {ema50:.1f}\n\n"
+                       f"SL: {sl:.2f}\nTP: {tp:.2f}\nRR: {rr}\n\n"
+                       f"#GOLD #XAUUSD")
                 send(msg)
-                last_time = time.time()
-                print(f"SENT {sig}")
+                last_sig = time.time()
+                print(f"SENT PRO {sig} Score {max(score_sell,score_buy)}")
 
-            print(f"Price {price:.2f} Asia {asia_low:.1f}-{asia_high:.1f}")
             time.sleep(60)
         except Exception as e:
-            print(f"Error {e}")
-            time.sleep(60)
+            print(f"ERR {e}"); time.sleep(60)
 
-threading.Thread(target=bot_loop, daemon=True).start()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+threading.Thread(target=loop, daemon=True).start()
+app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
