@@ -1,108 +1,105 @@
-import requests, time, os, threading
+import os, time, threading, requests
 from flask import Flask
-
-TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-app = Flask(__name__)
+TOKEN=os.getenv("BOT_TOKEN")
+CHANNEL="@xauusdakyl"
+SYMBOL="PAXGUSDT" # Алтындын Binance'дагы символу
+DISPLAY="XAUUSD"
+app=Flask(__name__)
 @app.route('/')
-def home(): return "XAUUSD AMD PRO LIVE"
+def home(): return "XAU PERCENT LIVE"
+LAST=0
 
-def send(text):
+def send(m):
     try:
-        requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
-    except: pass
+        r=requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",json={"chat_id":CHANNEL,"text":m,"parse_mode":"HTML"},timeout=15)
+        print(f"SEND {r.status_code} {r.text[:200]}",flush=True)
+        return r.ok
+    except Exception as e: print(f"ERR {e}",flush=True); return False
 
-def get_data(symbol="GC=F", range_="2d", interval="5m"):
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval={interval}&range={range_}"
-    j = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=15).json()['chart']['result'][0]
-    q = j['indicators']['quote'][0]
-    closes = [x for x in q['close'] if x]
-    highs = [x for x in q['high'] if x]
-    lows = [x for x in q['low'] if x]
-    return closes, highs, lows
+def get_candles(limit=150):
+    for base in ["https://data-api.binance.vision/api/v3/klines","https://fapi.binance.com/fapi/v1/klines"]:
+        try:
+            j=requests.get(f"{base}?symbol={SYMBOL}&interval=5m&limit={limit}",headers={"User-Agent":"Mozilla/5.0"},timeout=10).json()
+            if isinstance(j,list) and len(j)>100:
+                c=[float(x[4]) for x in j]; h=[float(x[2]) for x in j]; l=[float(x[3]) for x in j]; v=[float(x[5]) for x in j]
+                return c,h,l,v
+        except: pass
+    return [],[],[],[]
 
-def rsi_calc(closes, period=14):
-    gains = losses = 0
-    for i in range(1, period+1):
-        diff = closes[-i] - closes[-i-1]
-        if diff > 0: gains += diff
-        else: losses += abs(diff)
-    if losses == 0: return 70
-    rs = (gains/period) / (losses/period)
-    return 100 - (100 / (1+rs))
+def rsi(c,p=14):
+    g=sum(max(0,c[-i]-c[-i-1]) for i in range(1,p+1))/p
+    l=sum(max(0,c[-i-1]-c[-i]) for i in range(1,p+1))/p
+    return 100-(100/(1+g/l)) if l!=0 else 50
 
-last_sig = 0
+def ema(c,p):
+    k=2/(p+1); e=sum(c[:p])/p
+    for x in c[p:]: e=x*k+e*(1-k)
+    return e
+
 def loop():
-    global last_sig
-    print("AMD PRO STARTED")
+    global LAST
+    print("XAU GOLD PERCENT STARTED",flush=True)
     while True:
         try:
-            c5, h5, l5 = get_data("GC=F", "2d", "5m")
-            c1h, _, _ = get_data("GC=F", "5d", "1h") # H1 тренд
+            c,h,l,v=get_candles(150)
+            if len(c)<120: time.sleep(20); continue
+            price=c[-1]
+            e20=ema(c,20); e50=ema(c,50); e200=ema(c,200)
+            r=rsi(c)
+            e12=ema(c,12); e26=ema(c,26); macd=e12-e26
+            sma=sum(c[-20:])/20; std=(sum((x-sma)**2 for x in c[-20:])/20)**0.5
+            bb_up=sma+std*2; bb_low=sma-std*2
+            vol_avg=sum(v[-20:])/20
+            ah=max(h[-72:-12]); al=min(l[-72:-12])
 
-            if len(c5) < 100: time.sleep(60); continue
+            score_buy=0; score_sell=0
+            if e20>e50>e200: score_buy+=2
+            if e20<e50<e200: score_sell+=2
+            if e20>e50: score_buy+=1
+            if e20<e50: score_sell+=1
+            if 40<r<70: score_buy+=1; score_sell+=1
+            if r>50 and macd>0: score_buy+=1
+            if r<50 and macd<0: score_sell+=1
+            if price>bb_low and price<bb_up: score_buy+=1; score_sell+=1
+            if v[-1]>vol_avg*1.2: score_buy+=1; score_sell+=1
+            if price<e20*1.002 and e20>e50: score_buy+=1
+            if price>e20*0.998 and e20<e50: score_sell+=1
+            if c[-1]>c[-2]: score_buy+=1
+            if c[-1]<c[-2]: score_sell+=1
 
-            price = c5[-1]
-            ema20 = sum(c5[-20:])/20
-            ema50 = sum(c5[-50:])/50
-            ema1h = sum(c1h[-50:])/50
-            rsi = rsi_calc(c5)
+            percent_buy=min(100,score_buy*10)
+            percent_sell=min(100,score_sell*10)
+            best=max(percent_buy,percent_sell)
+            sig="BUY" if percent_buy>percent_sell else "SELL" if percent_sell>percent_buy else None
 
-            # 1. Азия коробкасы
-            asia_h = max(h5[-80:-20])
-            asia_l = min(l5[-80:-20])
+            print(f"CHECK GOLD {price:.1f} BUY {percent_buy}% SELL {percent_sell}% -> {sig}",flush=True)
 
-            # 2. Манипуляция текшерүү (Sweep)
-            prev = c5[-2]
-            sweep_high = prev < asia_h and price > asia_h
-            sweep_low = prev > asia_l and price < asia_l
+            if best>=60 and sig and time.time()-LAST>1800:
+                risk=3.5 # Алтын үчүн SL 3.5$
+                if sig=="BUY":
+                    entry=price; sl=entry-risk
+                    tp1=entry+risk*1; tp2=entry+risk*2; tp3=entry+risk*3
+                    msg=f"""🟢 <b>{DISPLAY} {sig} {best}%</b>
 
-            # 3. Структура (BOS) - коробкадан кайтуу
-            bos_sell = price < (asia_h - (asia_h-asia_l)*0.3)
-            bos_buy = price > (asia_l + (asia_h-asia_l)*0.3)
+<b>Buy at:</b> {entry:.2f}
+<b>Stop loss:</b> {sl:.2f}
 
-            # 4. Скор системасы
-            score_sell = 0
-            if sweep_high: score_sell+=1
-            if ema20 < ema50: score_sell+=1
-            if price < ema1h: score_sell+=1 # H1 да SELL болсо
-            if bos_sell and rsi < 60: score_sell+=1
+<b>TP1:</b> {tp1:.2f}
+<b>TP2:</b> {tp2:.2f}
+<b>TP3:</b> {tp3:.2f}
 
-            score_buy = 0
-            if sweep_low: score_buy+=1
-            if ema20 > ema50: score_buy+=1
-            if price > ema1h: score_buy+=1
-            if bos_buy and rsi > 40: score_buy+=1
+RSI:{r:.0f} EMA:{e20:.1f}/{e50:.1f}
+🔥 High Probability
 
-            sig = None
-            if score_sell >= 3: sig = "SELL"
-            if score_buy >= 3: sig = "BUY"
+#XAUUSD #{sig}"""
+                else:
+                    entry=price; sl=entry+risk
+                    tp1=entry-risk*1; tp2=entry-risk*2; tp3=entry-risk*3
+                    msg=f"""🔴 <b>{DISPLAY} {sig} {best}%</b>
 
-            # Эски катаны оңдоо: H1 BUY болуп турганда SELL бербейбиз
-            if sig=="SELL" and price > ema1h and rsi > 52:
-                print(f"BLOCKED FAKE SELL - H1 is BUY, RSI {rsi:.1f}")
-                sig = None
-            if sig=="BUY" and price < ema1h and rsi < 48:
-                sig = None
+<b>Sell at:</b> {entry:.2f}
+<b>Stop loss:</b> {sl:.2f}
 
-            if sig and (time.time()-last_sig) > 10800: # 3 саатта 1
-                sl = asia_h + 6 if sig=="SELL" else asia_l - 6
-                tp = asia_l if sig=="SELL" else asia_h
-                rr = f"{abs(price-sl):.2f} / {abs(tp-price):.2f}"
-                icon = "🔴" if sig=="SELL" else "🟢"
-                msg = (f"{icon} <b>XAUUSD {sig} {price:.2f}</b>\n\n"
-                       f"Score: {max(score_sell,score_buy)}/4 | RSI: {rsi:.1f}\n"
-                       f"EMA20: {ema20:.1f} | EMA50: {ema50:.1f}\n\n"
-                       f"SL: {sl:.2f}\nTP: {tp:.2f}\nRR: {rr}\n\n"
-                       f"#GOLD #XAUUSD")
-                send(msg)
-                last_sig = time.time()
-                print(f"SENT PRO {sig} Score {max(score_sell,score_buy)}")
-
-            time.sleep(60)
-        except Exception as e:
-            print(f"ERR {e}"); time.sleep(60)
-
-threading.Thread(target=loop, daemon=True).start()
-app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+<b>TP1:</b> {tp1:.2f}
+<b>TP2:</b> {tp2:.2f}
+<b>TP
