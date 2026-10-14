@@ -9,11 +9,14 @@ app = Flask(__name__)
 
 def send(text):
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        data={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=15)
-        print("Signal sent")
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+        r = requests.post(url, json=data, timeout=10)
+        print(f"Telegram response: {r.text}") # ушул маанилүү!
+        return r.ok
     except Exception as e:
-        print(e)
+        print(f"Send error {e}")
+        return False
 
 def get_gold():
     """Алтын баасы - эң туруктуу булак"""
