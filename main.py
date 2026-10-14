@@ -2,9 +2,9 @@ import os, time, threading, requests
 from flask import Flask
 from datetime import datetime
 import math
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = "-1008639126332"
+import os
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 app = Flask(__name__)
 
 def send(text):
