@@ -4,7 +4,7 @@ from datetime import datetime
 import math
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = "@xauusdakyl"
+CHAT_ID = "-1008639126332"
 app = Flask(__name__)
 
 def send(text):
